@@ -24,6 +24,44 @@ def esc(s):
     if not s: return ""
     return str(s).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
 
+def name_aliases(name):
+    """Generate alternate display names for better playlist matching."""
+    seen = {name}
+    aliases = []
+
+    def add(n):
+        n = " ".join(n.split())  # collapse extra whitespace
+        if n and n not in seen:
+            seen.add(n)
+            aliases.append(n)
+
+    # & → And  (e.g. "&Pictures" → "And Pictures")
+    if "&" in name:
+        add(name.replace("&", "And "))
+        add(name.replace("&", "and "))
+
+    # And → &  (e.g. "And TV" → "&TV", in case EPG uses & but playlist uses And)
+    import re as _re
+    if _re.match(r"(?i)^And\s", name):
+        add(_re.sub(r"(?i)^And\s+", "&", name))
+
+    # + → Plus  (e.g. "Star+Gold" → "Star Plus Gold", "Jio+" → "Jio Plus")
+    if "+" in name:
+        add(name.replace("+", " Plus ").replace("  ", " ").strip())
+        add(name.replace("+", "Plus"))
+
+    # Remove/replace common special chars that differ across playlists
+    cleaned = _re.sub(r"[:\-\.]", " ", name)
+    cleaned = " ".join(cleaned.split())
+    add(cleaned)
+
+    # Strip trailing quality tags (HD, SD, FHD, 4K) for name-only match
+    for tag in (" HD", " SD", " FHD", " 4K", " hd", " sd"):
+        if name.endswith(tag):
+            add(name[:-len(tag)])
+
+    return aliases
+
 def epoch_ms_to_xmltv(ms):
     dt = datetime.datetime.fromtimestamp(ms/1000, tz=datetime.timezone.utc)
     return dt.strftime("%Y%m%d%H%M%S +0000")
@@ -204,8 +242,8 @@ for ch in jio_channels:
     logo_tag = f'<icon src="{esc(logo)}"/>' if logo else ""
     lines.append(f'  <channel id="{esc(xml_id)}">')
     lines.append(f'    <display-name lang="en">{esc(name)}</display-name>')
-    if name.startswith("&"):
-        lines.append(f'    <display-name lang="en">{esc("And " + name[1:])}</display-name>')
+    for alias in name_aliases(name):
+        lines.append(f'    <display-name lang="en">{esc(alias)}</display-name>')
     if logo_tag: lines.append(f"    {logo_tag}")
     lines.append('  </channel>')
 
@@ -225,8 +263,8 @@ for ch in zee5_channels:
     logo_tag = f'<icon src="{esc(logo)}"/>' if logo else ""
     lines.append(f'  <channel id="{esc(xml_id)}">')
     lines.append(f'    <display-name lang="en">{esc(name)}</display-name>')
-    if name.startswith("&"):
-        lines.append(f'    <display-name lang="en">{esc("And " + name[1:])}</display-name>')
+    for alias in name_aliases(name):
+        lines.append(f'    <display-name lang="en">{esc(alias)}</display-name>')
     if logo_tag: lines.append(f"    {logo_tag}")
     lines.append('  </channel>')
 

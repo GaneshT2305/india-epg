@@ -1,0 +1,34 @@
+name: Update EPG
+
+on:
+  schedule:
+    - cron: '0 0,12 * * *'   # 00:00 and 12:00 UTC = 05:30 and 17:30 IST
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  generate-epg:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Generate EPG (JioTV + Zee5)
+        run: python generate_epg.py epg.xml.gz
+        timeout-minutes: 15
+
+      - name: Check output
+        run: ls -lh epg.xml.gz
+
+      - name: Commit EPG file
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: 'EPG update'
+          file_pattern: epg.xml.gz

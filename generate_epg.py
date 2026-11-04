@@ -25,7 +25,18 @@ def esc(s):
     return str(s).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;")
 
 def name_aliases(name):
-    """Generate alternate display names for better playlist matching."""
+    """Generate alternate display names for better playlist matching.
+
+    Handles common mismatches between playlist channel names and EPG names:
+    - Country/category prefix codes: 'MA- Zee Marathi' -> 'Zee Marathi'
+    - '&' <-> 'And': '&Pictures' <-> 'And Pictures'
+    - '+' -> 'Plus': 'Sony LIV+' -> 'Sony LIV Plus'
+    - Special chars (. -) normalized: 'Star.Plus' -> 'Star Plus'
+    - Extra/double spaces collapsed
+    - 4K/FHD/UHD suffix stripped (resolution-only tags, same content)
+    - NOTE: HD and SD are NOT stripped — they carry different feeds/content
+    """
+    import re as _re
     seen = {name}
     aliases = []
 
@@ -35,30 +46,41 @@ def name_aliases(name):
             seen.add(n)
             aliases.append(n)
 
-    # & → And  (e.g. "&Pictures" → "And Pictures")
-    if "&" in name:
-        add(name.replace("&", "And "))
-        add(name.replace("&", "and "))
+    # --- Strip country/category prefix codes ---
+    # Patterns: 'MA- Zee Marathi', 'IN: Star Plus', 'EN | BBC'
+    # Code is 2-4 uppercase letters (or digits like '4K') followed by separator
+    prefix_match = _re.match(r"^([A-Z0-9]{2,4})\s*[-:|]\s*(.+)$", name)
+    if prefix_match:
+        bare = prefix_match.group(2).strip()
+        add(bare)
+        # Also apply other transforms to the bare name
+        name_for_transforms = bare
+    else:
+        name_for_transforms = name
 
-    # And → &  (e.g. "And TV" → "&TV", in case EPG uses & but playlist uses And)
-    import re as _re
-    if _re.match(r"(?i)^And\s", name):
-        add(_re.sub(r"(?i)^And\s+", "&", name))
+    # --- & <-> And ---
+    if "&" in name_for_transforms:
+        add(name_for_transforms.replace("&", "And "))
+        add(name_for_transforms.replace("&", "and "))
+    if _re.match(r"(?i)^And\s", name_for_transforms):
+        add(_re.sub(r"(?i)^And\s+", "&", name_for_transforms))
 
-    # + → Plus  (e.g. "Star+Gold" → "Star Plus Gold", "Jio+" → "Jio Plus")
-    if "+" in name:
-        add(name.replace("+", " Plus ").replace("  ", " ").strip())
-        add(name.replace("+", "Plus"))
+    # --- + → Plus ---
+    if "+" in name_for_transforms:
+        add(name_for_transforms.replace("+", " Plus ").replace("  ", " ").strip())
+        add(name_for_transforms.replace("+", "Plus"))
 
-    # Remove/replace common special chars that differ across playlists
-    cleaned = _re.sub(r"[:\-\.]", " ", name)
+    # --- Normalize special chars (. and -) to spaces ---
+    cleaned = _re.sub(r"[.\-]", " ", name_for_transforms)
     cleaned = " ".join(cleaned.split())
     add(cleaned)
 
-    # Strip trailing quality tags (HD, SD, FHD, 4K) for name-only match
-    for tag in (" HD", " SD", " FHD", " 4K", " hd", " sd"):
-        if name.endswith(tag):
-            add(name[:-len(tag)])
+    # --- Strip resolution-only suffixes (same content, different quality) ---
+    # 4K, FHD, UHD are resolution tags — the schedule is the same as the base channel
+    # HD and SD are intentionally NOT stripped (they carry different programming)
+    for tag in (" 4K", " FHD", " UHD", " 4k", " fhd", " uhd"):
+        if name_for_transforms.endswith(tag):
+            add(name_for_transforms[:-len(tag)])
 
     return aliases
 

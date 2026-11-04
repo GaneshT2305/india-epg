@@ -204,6 +204,8 @@ for ch in jio_channels:
     logo_tag = f'<icon src="{esc(logo)}"/>' if logo else ""
     lines.append(f'  <channel id="{esc(xml_id)}">')
     lines.append(f'    <display-name lang="en">{esc(name)}</display-name>')
+    if name.startswith("&"):
+        lines.append(f'    <display-name lang="en">{esc("And " + name[1:])}</display-name>')
     if logo_tag: lines.append(f"    {logo_tag}")
     lines.append('  </channel>')
 
@@ -223,6 +225,8 @@ for ch in zee5_channels:
     logo_tag = f'<icon src="{esc(logo)}"/>' if logo else ""
     lines.append(f'  <channel id="{esc(xml_id)}">')
     lines.append(f'    <display-name lang="en">{esc(name)}</display-name>')
+    if name.startswith("&"):
+        lines.append(f'    <display-name lang="en">{esc("And " + name[1:])}</display-name>')
     if logo_tag: lines.append(f"    {logo_tag}")
     lines.append('  </channel>')
 

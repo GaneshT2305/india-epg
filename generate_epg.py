@@ -243,11 +243,73 @@ for ch in zee5_channels:
 for t in zee5_threads: t.join()
 print(f"  EPG data for {len(zee5_epg)} Zee5 channels")
 
+# ─── MAGTICOM.GE (Bollywood HD and other non-Indian channels) ─────────────────
+print("\n=== magticom.ge ===")
+# Map: (channel_display_name, xmltv_id, magticom_channel_id)
+# Bollywood HD = Bollywood.ru as listed on magticom.ge Georgian TV guide (site_id=260)
+MAGTICOM_CHANNELS = [
+    ("Bollywood HD", "BollywoodHD.ro", "260"),
+]
+# magticom.ge returns timestamps in Georgia local time (UTC+4)
+MAGTICOM_TZ = datetime.timezone(datetime.timedelta(hours=4))
+
+def magticom_to_xmltv(ts_str):
+    if not ts_str: return None
+    try:
+        dt = datetime.datetime.fromisoformat(ts_str).replace(tzinfo=MAGTICOM_TZ)
+        return dt.astimezone(datetime.timezone.utc).strftime("%Y%m%d%H%M%S +0000")
+    except:
+        return None
+
+magticom_channels_data = []  # list of (name, xmltv_id, progs)
+
+for name, xmltv_id, channel_id in MAGTICOM_CHANNELS:
+    progs = []
+    for day_offset in [0, 1]:
+        date = today_utc.replace(hour=0, minute=0, second=0, microsecond=0) + datetime.timedelta(days=day_offset)
+        start_ts = int(date.timestamp())
+        end_ts = start_ts + 86400
+        post_data = urllib.parse.urlencode({
+            "channelId": channel_id,
+            "start": start_ts,
+            "end": end_ts,
+        }).encode()
+        raw = fetch(
+            "https://www.magticom.ge/request/channel-program.php",
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+                "Referer": "https://www.magticom.ge/en/tv/tv-services/tv-guide",
+            },
+            data=post_data,
+        )
+        if raw:
+            try:
+                items = json.loads(raw)
+                for item in items:
+                    start = magticom_to_xmltv(item.get("startTimestamp", ""))
+                    stop  = magticom_to_xmltv(item.get("endTimestamp", ""))
+                    if start and stop:
+                        progs.append({
+                            "start": start, "stop": stop,
+                            "title": item.get("title", ""),
+                            "desc":  item.get("info", "") or item.get("subTitle", ""),
+                        })
+            except Exception as e:
+                print(f"  magticom.ge parse error: {e}")
+    print(f"  {name}: {len(progs)} programmes")
+    magticom_channels_data.append((name, xmltv_id, progs))
+
 # ─── GENERATE XMLTV ───────────────────────────────────────────────────────────
 print("\n=== Generating XMLTV ===")
+
+# Extra display-name aliases for channels where playlist spelling differs from JioTV API name
+# key: channel_name.lower() as returned by JioTV API
+EXTRA_ALIASES = {
+    "9x jhakaas": ["9x Jhakas", "9X Jhakas"],  # playlists often spell with single 'a'
+}
 lines = [
     '<?xml version="1.0" encoding="UTF-8"?>',
-    '<tv generator-info-name="india-epg-merged" source-info-name="JioTV+Zee5">',
+    '<tv generator-info-name="india-epg-merged" source-info-name="JioTV+Zee5+magticom">',
 ]
 
 # Channels
@@ -269,6 +331,8 @@ for ch in jio_channels:
     lines.append(f'  <channel id="{esc(xml_id)}">')
     lines.append(f'    <display-name lang="en">{esc(name)}</display-name>')
     for alias in name_aliases(name):
+        lines.append(f'    <display-name lang="en">{esc(alias)}</display-name>')
+    for alias in EXTRA_ALIASES.get(name.lower(), []):
         lines.append(f'    <display-name lang="en">{esc(alias)}</display-name>')
     if logo_tag: lines.append(f"    {logo_tag}")
     lines.append('  </channel>')
@@ -299,6 +363,18 @@ for ch in zee5_channels:
     lines.append('  </channel>')
 
 print(f"  Zee5: skipped {zee5_skipped} channels already covered by JioTV")
+
+# magticom.ge channels (non-Indian: Bollywood HD etc.)
+all_xml_ids_used = set(jio_xml_ids_used)
+for pname, pxmlid, _progs in magticom_channels_data:
+    if pxmlid in all_xml_ids_used:
+        continue  # skip if somehow already covered
+    all_xml_ids_used.add(pxmlid)
+    lines.append(f'  <channel id="{esc(pxmlid)}">')
+    lines.append(f'    <display-name lang="en">{esc(pname)}</display-name>')
+    for alias in name_aliases(pname):
+        lines.append(f'    <display-name lang="en">{esc(alias)}</display-name>')
+    lines.append('  </channel>')
 
 # JioTV programmes
 prog_count = 0
@@ -341,6 +417,20 @@ for ch in zee5_channels:
         lines.append('  </programme>')
         prog_count += 1
 
+# magticom.ge programmes (Bollywood HD etc.)
+for pname, pxmlid, progs in magticom_channels_data:
+    for p in progs:
+        title = esc(p.get("title",""))
+        desc  = esc(p.get("desc",""))
+        genre = esc(p.get("category",""))
+        if not title: continue
+        lines.append(f'  <programme start="{p["start"]}" stop="{p["stop"]}" channel="{esc(pxmlid)}">')
+        lines.append(f'    <title lang="en">{title}</title>')
+        if desc: lines.append(f'    <desc lang="en">{desc}</desc>')
+        if genre: lines.append(f'    <category lang="en">{genre}</category>')
+        lines.append('  </programme>')
+        prog_count += 1
+
 lines.append("</tv>")
 
 content = "\n".join(lines).encode("utf-8")
@@ -353,9 +443,10 @@ else:
 
 size_kb = os.path.getsize(OUT_XML)//1024
 zee5_unique = len(zee5_channels) - zee5_skipped
-total_channels = len(jio_channels) + zee5_unique
+magticom_unique = len(magticom_channels_data)
+total_channels = len(jio_channels) + zee5_unique + magticom_unique
 print(f"\nDone! {OUT_XML}")
-print(f"  Channels: {len(jio_channels)} JioTV + {zee5_unique} Zee5 unique ({zee5_skipped} Zee5 duplicates skipped) = {total_channels} total")
+print(f"  Channels: {len(jio_channels)} JioTV + {zee5_unique} Zee5 unique ({zee5_skipped} Zee5 duplicates skipped) + {magticom_unique} magticom.ge = {total_channels} total")
 print(f"  Programmes: {prog_count:,}")
 print(f"  File size: {size_kb:,} KB (compressed)")
 print(f"\nChannel ID format:")

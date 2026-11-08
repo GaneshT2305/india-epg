@@ -124,6 +124,23 @@ if raw_xml:
     except:
         pass
 
+# Cross-provider name→xmltv_id fallback for JioTV channels not in iptv-org JioTV XML
+# (e.g. Star Pravah Picture HD — present in JioTV but absent from iptv-org jiotv.com)
+print("  Loading cross-provider xmltv_id lookup...")
+cross_xids = {}
+for _site in ["tataplay.com", "dishtv.in", "airtelxstream.in"]:
+    _raw = fetch(f"https://raw.githubusercontent.com/iptv-org/epg/master/sites/{_site}/{_site}.channels.xml")
+    if _raw:
+        try:
+            _t = ET.fromstring(_raw)
+            for _ch in _t.findall("channel"):
+                _n = (_ch.text or "").strip()
+                _x = _ch.get("xmltv_id", "")
+                if _x and _n:
+                    cross_xids.setdefault(_n.lower(), _x)
+        except: pass
+print(f"  {len(cross_xids)} cross-provider entries")
+
 print("Fetching EPG (today + tomorrow)...")
 jio_epg = {}
 lock = threading.Lock()
@@ -243,6 +260,186 @@ for ch in zee5_channels:
 for t in zee5_threads: t.join()
 print(f"  EPG data for {len(zee5_epg)} Zee5 channels")
 
+# ─── TATA PLAY ────────────────────────────────────────────────────────────────
+print("\n=== Tata Play ===")
+TATAPLAY_HEADERS = {
+    "Accept": "*/*", "Origin": "https://watch.tataplay.com",
+    "Referer": "https://watch.tataplay.com/",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "content-type": "application/json", "locale": "ENG",
+}
+print("  Loading iptv-org xmltv_id mapping...")
+tataplay_site_to_xid = {}
+raw_xml = fetch("https://raw.githubusercontent.com/iptv-org/epg/master/sites/tataplay.com/tataplay.com.channels.xml")
+if raw_xml:
+    try:
+        _t = ET.fromstring(raw_xml)
+        for _ch in _t.findall("channel"):
+            _sid = _ch.get("site_id", ""); _x = _ch.get("xmltv_id", "")
+            if _sid: tataplay_site_to_xid[_sid] = _x
+        print(f"  {len(tataplay_site_to_xid)} site_id→xmltv_id mappings")
+    except: pass
+
+print("  Fetching channel list...")
+tataplay_ch_info = []
+for _offset in range(0, 2000, 1000):
+    _raw = fetch(f"https://tm.tapi.videoready.tv/portal-search/pub/api/v1/channels?limit=1000&offset={_offset}", headers=TATAPLAY_HEADERS)
+    if not _raw: break
+    try:
+        _lst = json.loads(_raw).get("data", {}).get("list", [])
+        tataplay_ch_info.extend(_lst)
+        if len(_lst) < 1000: break
+    except: break
+tataplay_ch_info = [
+    {"id": str(c.get("id","")), "name": c.get("title",""),
+     "xml_id": (tataplay_site_to_xid.get(str(c.get("id",""))) or f"tataplay_{c.get('id','')}"),
+     "logo": c.get("transparentImageUrl","") or c.get("thumbnailImage","")}
+    for c in tataplay_ch_info if c.get("id")
+]
+print(f"  {len(tataplay_ch_info)} channels")
+
+print(f"  Fetching Tata Play EPG ({len(tataplay_ch_info)} channels, today + tomorrow)...")
+tataplay_epg = {}
+_tp_lock = threading.Lock(); _tp_done = [0]
+def _fetch_tp_epg(ch):
+    cid = ch["id"]; progs = []
+    for day_offset in [0, 1]:
+        date = today_ist + datetime.timedelta(days=day_offset)
+        raw = fetch(f"https://tm.tapi.videoready.tv/content-detail/pub/api/v2/channels/schedule?date={date.strftime('%d-%m-%Y')}",
+                    headers=TATAPLAY_HEADERS, data=json.dumps({"id": cid}).encode())
+        if raw:
+            try: progs.extend(json.loads(raw).get("data",{}).get("epg",[]))
+            except: pass
+        time.sleep(0.05)
+    with _tp_lock:
+        if progs: tataplay_epg[cid] = progs
+        _tp_done[0] += 1
+        if _tp_done[0] % 150 == 0: print(f"  Tata Play EPG: {_tp_done[0]}/{len(tataplay_ch_info)}")
+_tp_threads = []
+for _ch in tataplay_ch_info:
+    _t = threading.Thread(target=_fetch_tp_epg, args=(_ch,), daemon=True)
+    _tp_threads.append(_t); _t.start()
+    while sum(1 for x in _tp_threads if x.is_alive()) >= 20: time.sleep(0.2)
+for _t in _tp_threads: _t.join()
+print(f"  EPG data for {len(tataplay_epg)} Tata Play channels")
+
+# ─── DISH TV ──────────────────────────────────────────────────────────────────
+print("\n=== Dish TV ===")
+print("  Fetching auth token...")
+dishtv_token = None
+_raw = fetch("https://www.dishtv.in/services/epg/signin",
+             headers={"sec-fetch-dest":"empty","sec-fetch-mode":"cors","sec-fetch-site":"same-origin",
+                      "x-requested-with":"XMLHttpRequest","Referer":"https://www.dishtv.in/channel-guide.html"},
+             data=b"")
+if _raw:
+    try: dishtv_token = json.loads(_raw).get("token","")
+    except: pass
+if dishtv_token: print(f"  Token obtained ({len(dishtv_token)} chars)")
+else: print("  WARNING: No token — Dish TV EPG will be skipped")
+
+print("  Loading iptv-org channels...")
+dishtv_ch_info = []
+raw_xml = fetch("https://raw.githubusercontent.com/iptv-org/epg/master/sites/dishtv.in/dishtv.in.channels.xml")
+if raw_xml:
+    try:
+        _t = ET.fromstring(raw_xml)
+        for _ch in _t.findall("channel"):
+            _sid = _ch.get("site_id",""); _x = _ch.get("xmltv_id",""); _n = (_ch.text or "").strip()
+            if _sid and _n:
+                dishtv_ch_info.append({"id": _sid, "name": _n, "xml_id": _x if _x else f"dishtv_{_sid}"})
+        print(f"  {len(dishtv_ch_info)} channels from iptv-org")
+    except: pass
+
+dishtv_epg = {}
+if dishtv_token and dishtv_ch_info:
+    print(f"  Fetching Dish TV EPG ({len(dishtv_ch_info)} channels, today + tomorrow)...")
+    _dt_lock = threading.Lock(); _dt_done = [0]
+    _DT_HEADERS = {"Authorization": dishtv_token, "Content-Type": "application/json"}
+    def _fetch_dt_epg(ch):
+        cid = ch["id"]; progs = []
+        for day_offset in [0, 1]:
+            date = today_ist + datetime.timedelta(days=day_offset)
+            raw = fetch("https://epg.mysmartstick.com/dishtv/api/v1/epg/entities/programs",
+                        headers=_DT_HEADERS,
+                        data=json.dumps({"allowPastEvents": True, "channelid": cid, "date": date.strftime("%d/%m/%Y")}).encode())
+            if raw:
+                try:
+                    items = json.loads(raw)
+                    for item in (items if isinstance(items, list) else []):
+                        start = iso_to_xmltv(item.get("start",""))
+                        stop  = iso_to_xmltv(item.get("stop",""))
+                        if not start or not stop: continue
+                        reg = item.get("regional",{})
+                        en = reg.get("english") or (list(reg.values())[0] if reg else {})
+                        progs.append({"start": start, "stop": stop,
+                                      "title": en.get("title","") or item.get("title",""),
+                                      "desc": en.get("desc",""), "genre": en.get("genre","")})
+                except: pass
+            time.sleep(0.05)
+        with _dt_lock:
+            if progs: dishtv_epg[cid] = progs
+            _dt_done[0] += 1
+            if _dt_done[0] % 150 == 0: print(f"  Dish TV EPG: {_dt_done[0]}/{len(dishtv_ch_info)}")
+    _dt_threads = []
+    for _ch in dishtv_ch_info:
+        _t = threading.Thread(target=_fetch_dt_epg, args=(_ch,), daemon=True)
+        _dt_threads.append(_t); _t.start()
+        while sum(1 for x in _dt_threads if x.is_alive()) >= 15: time.sleep(0.2)
+    for _t in _dt_threads: _t.join()
+    print(f"  EPG data for {len(dishtv_epg)} Dish TV channels")
+
+# ─── AIRTEL ───────────────────────────────────────────────────────────────────
+print("\n=== Airtel ===")
+_AIRTEL_HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                   "Referer": "https://www.airtelxstream.in/"}
+print("  Loading iptv-org channels...")
+airtel_ch_info = []
+raw_xml = fetch("https://raw.githubusercontent.com/iptv-org/epg/master/sites/airtelxstream.in/airtelxstream.in.channels.xml")
+if raw_xml:
+    try:
+        _t = ET.fromstring(raw_xml)
+        for _ch in _t.findall("channel"):
+            _sid = _ch.get("site_id",""); _x = _ch.get("xmltv_id",""); _n = (_ch.text or "").strip()
+            if _sid and _n:
+                airtel_ch_info.append({"id": _sid, "name": _n, "xml_id": _x if _x else f"airtel_{_sid}"})
+        print(f"  {len(airtel_ch_info)} channels from iptv-org")
+    except: pass
+
+print(f"  Fetching Airtel EPG ({len(airtel_ch_info)} channels, 2-day window)...")
+airtel_epg = {}
+_at_lock = threading.Lock(); _at_done = [0]
+_at_start = int(today_utc.replace(hour=0,minute=0,second=0,microsecond=0).timestamp() * 1000)
+_at_end = _at_start + 2 * 86400000
+def _fetch_at_epg(ch):
+    sid = ch["id"]; progs = []
+    raw = fetch(f"https://epg.airtel.tv/app/v2/content/channel/epg?channelId={sid}&startTime={_at_start}&endTime={_at_end}",
+                headers=_AIRTEL_HEADERS)
+    if raw:
+        try:
+            guide = json.loads(raw).get("programGuide",{})
+            key = list(guide.keys())[0] if guide else None
+            if key:
+                for item in guide[key]:
+                    start = epoch_ms_to_xmltv(item.get("startTime",0))
+                    stop  = epoch_ms_to_xmltv(item.get("endTime",0))
+                    if not start or not stop: continue
+                    genres = item.get("genres",[]) or []
+                    genre = genres[0] if genres and isinstance(genres[0],str) else ""
+                    progs.append({"start":start,"stop":stop,"title":item.get("title",""),
+                                  "desc":item.get("desc","") or "","genre":genre})
+        except: pass
+    with _at_lock:
+        if progs: airtel_epg[sid] = progs
+        _at_done[0] += 1
+        if _at_done[0] % 150 == 0: print(f"  Airtel EPG: {_at_done[0]}/{len(airtel_ch_info)}")
+_at_threads = []
+for _ch in airtel_ch_info:
+    _t = threading.Thread(target=_fetch_at_epg, args=(_ch,), daemon=True)
+    _at_threads.append(_t); _t.start()
+    while sum(1 for x in _at_threads if x.is_alive()) >= 20: time.sleep(0.2)
+for _t in _at_threads: _t.join()
+print(f"  EPG data for {len(airtel_epg)} Airtel channels")
+
 # ─── MAGTICOM.GE (Bollywood HD and other non-Indian channels) ─────────────────
 print("\n=== magticom.ge ===")
 # Map: (channel_display_name, xmltv_id, magticom_channel_id)
@@ -320,7 +517,7 @@ EXTRA_ALIASES = {
 }
 lines = [
     '<?xml version="1.0" encoding="UTF-8"?>',
-    '<tv generator-info-name="india-epg-merged" source-info-name="JioTV+Zee5+magticom">',
+    '<tv generator-info-name="india-epg-merged" source-info-name="JioTV+Zee5+TataPlay+DishTV+Airtel+magticom">',
 ]
 
 # Channels
@@ -331,7 +528,7 @@ jio_xml_ids_used = set()  # all xmltv_ids written by JioTV (for Zee5 dedup)
 for ch in jio_channels:
     cid = str(ch["channel_id"])
     name = ch.get("channel_name","")
-    xid = jio_xmltv_ids.get(name.lower()) or jio_xmltv_ids.get(f"id_{cid}") or ""
+    xid = jio_xmltv_ids.get(name.lower()) or jio_xmltv_ids.get(f"id_{cid}") or cross_xids.get(name.lower()) or ""
     xml_id = xid if xid else f"jio_{cid}"
     jio_ch_id_map[cid] = xml_id
     jio_xml_ids_used.add(xml_id)
@@ -351,6 +548,7 @@ for ch in jio_channels:
 # Zee5 channels — skip any whose xmltv_id is already covered by JioTV
 zee5_ch_id_map = {}
 zee5_skipped = 0
+zee5_xml_ids_written = set()
 for ch in zee5_channels:
     cid = ch["id"]
     name = ch["name"]
@@ -362,6 +560,7 @@ for ch in zee5_channels:
     if xml_id in jio_xml_ids_used:
         zee5_skipped += 1
         continue
+    zee5_xml_ids_written.add(xml_id)
     logo = ch.get("logo","")
     if logo and not logo.startswith("http"):
         logo = f"https://akamaividz2.zee5.com/image/upload/resources/{cid}/channel_list/{logo}"
@@ -375,8 +574,58 @@ for ch in zee5_channels:
 
 print(f"  Zee5: skipped {zee5_skipped} channels already covered by JioTV")
 
+# Tata Play channels — skip any already covered by JioTV or Zee5
+all_xml_ids_used = set(jio_xml_ids_used) | zee5_xml_ids_written
+tp_written_ids = set()
+tp_skipped = 0
+for ch in tataplay_ch_info:
+    if ch["xml_id"] in all_xml_ids_used:
+        tp_skipped += 1
+        continue
+    all_xml_ids_used.add(ch["xml_id"])
+    tp_written_ids.add(ch["xml_id"])
+    logo_tag = f'<icon src="{esc(ch["logo"])}"/>' if ch.get("logo") else ""
+    lines.append(f'  <channel id="{esc(ch["xml_id"])}">')
+    lines.append(f'    <display-name lang="en">{esc(ch["name"])}</display-name>')
+    for alias in name_aliases(ch["name"]):
+        lines.append(f'    <display-name lang="en">{esc(alias)}</display-name>')
+    if logo_tag: lines.append(f"    {logo_tag}")
+    lines.append('  </channel>')
+print(f"  Tata Play: {len(tp_written_ids)} unique channels added ({tp_skipped} duplicates skipped)")
+
+# Dish TV channels
+dt_written_ids = set()
+dt_skipped = 0
+for ch in dishtv_ch_info:
+    if ch["xml_id"] in all_xml_ids_used:
+        dt_skipped += 1
+        continue
+    all_xml_ids_used.add(ch["xml_id"])
+    dt_written_ids.add(ch["xml_id"])
+    lines.append(f'  <channel id="{esc(ch["xml_id"])}">')
+    lines.append(f'    <display-name lang="en">{esc(ch["name"])}</display-name>')
+    for alias in name_aliases(ch["name"]):
+        lines.append(f'    <display-name lang="en">{esc(alias)}</display-name>')
+    lines.append('  </channel>')
+print(f"  Dish TV: {len(dt_written_ids)} unique channels added ({dt_skipped} duplicates skipped)")
+
+# Airtel channels
+at_written_ids = set()
+at_skipped = 0
+for ch in airtel_ch_info:
+    if ch["xml_id"] in all_xml_ids_used:
+        at_skipped += 1
+        continue
+    all_xml_ids_used.add(ch["xml_id"])
+    at_written_ids.add(ch["xml_id"])
+    lines.append(f'  <channel id="{esc(ch["xml_id"])}">')
+    lines.append(f'    <display-name lang="en">{esc(ch["name"])}</display-name>')
+    for alias in name_aliases(ch["name"]):
+        lines.append(f'    <display-name lang="en">{esc(alias)}</display-name>')
+    lines.append('  </channel>')
+print(f"  Airtel: {len(at_written_ids)} unique channels added ({at_skipped} duplicates skipped)")
+
 # magticom.ge channels (non-Indian: Bollywood HD etc.)
-all_xml_ids_used = set(jio_xml_ids_used)
 for pname, pxmlid, _progs in magticom_channels_data:
     if pxmlid in all_xml_ids_used:
         continue  # skip if somehow already covered
@@ -428,6 +677,57 @@ for ch in zee5_channels:
         lines.append('  </programme>')
         prog_count += 1
 
+# Tata Play programmes
+for ch in tataplay_ch_info:
+    if ch["xml_id"] not in tp_written_ids:
+        continue
+    for p in tataplay_epg.get(ch["id"], []):
+        start = epoch_ms_to_xmltv(p.get("startTime", 0))
+        stop  = epoch_ms_to_xmltv(p.get("endTime", 0))
+        if not start or not stop: continue
+        title = esc(p.get("title",""))
+        desc  = esc(p.get("desc","") or p.get("description",""))
+        genre = esc(p.get("category",""))
+        if not title: continue
+        lines.append(f'  <programme start="{start}" stop="{stop}" channel="{esc(ch["xml_id"])}">')
+        lines.append(f'    <title lang="en">{title}</title>')
+        if desc: lines.append(f'    <desc lang="en">{desc}</desc>')
+        if genre: lines.append(f'    <category lang="en">{genre}</category>')
+        lines.append('  </programme>')
+        prog_count += 1
+
+# Dish TV programmes
+for ch in dishtv_ch_info:
+    if ch["xml_id"] not in dt_written_ids:
+        continue
+    for p in dishtv_epg.get(ch["id"], []):
+        title = esc(p.get("title",""))
+        desc  = esc(p.get("desc",""))
+        genre = esc(p.get("genre",""))
+        if not title: continue
+        lines.append(f'  <programme start="{p["start"]}" stop="{p["stop"]}" channel="{esc(ch["xml_id"])}">')
+        lines.append(f'    <title lang="en">{title}</title>')
+        if desc: lines.append(f'    <desc lang="en">{desc}</desc>')
+        if genre: lines.append(f'    <category lang="en">{genre}</category>')
+        lines.append('  </programme>')
+        prog_count += 1
+
+# Airtel programmes
+for ch in airtel_ch_info:
+    if ch["xml_id"] not in at_written_ids:
+        continue
+    for p in airtel_epg.get(ch["id"], []):
+        title = esc(p.get("title",""))
+        desc  = esc(p.get("desc",""))
+        genre = esc(p.get("genre",""))
+        if not title: continue
+        lines.append(f'  <programme start="{p["start"]}" stop="{p["stop"]}" channel="{esc(ch["xml_id"])}">')
+        lines.append(f'    <title lang="en">{title}</title>')
+        if desc: lines.append(f'    <desc lang="en">{desc}</desc>')
+        if genre: lines.append(f'    <category lang="en">{genre}</category>')
+        lines.append('  </programme>')
+        prog_count += 1
+
 # magticom.ge programmes (Bollywood HD etc.)
 for pname, pxmlid, progs in magticom_channels_data:
     for p in progs:
@@ -455,9 +755,9 @@ else:
 size_kb = os.path.getsize(OUT_XML)//1024
 zee5_unique = len(zee5_channels) - zee5_skipped
 magticom_unique = len(magticom_channels_data)
-total_channels = len(jio_channels) + zee5_unique + magticom_unique
+total_channels = len(jio_channels) + zee5_unique + len(tp_written_ids) + len(dt_written_ids) + len(at_written_ids) + magticom_unique
 print(f"\nDone! {OUT_XML}")
-print(f"  Channels: {len(jio_channels)} JioTV + {zee5_unique} Zee5 unique ({zee5_skipped} Zee5 duplicates skipped) + {magticom_unique} magticom.ge = {total_channels} total")
+print(f"  Channels: {len(jio_channels)} JioTV + {zee5_unique} Zee5 + {len(tp_written_ids)} TataPlay + {len(dt_written_ids)} DishTV + {len(at_written_ids)} Airtel + {magticom_unique} magticom = {total_channels} total")
 print(f"  Programmes: {prog_count:,}")
 print(f"  File size: {size_kb:,} KB (compressed)")
 print(f"\nChannel ID format:")

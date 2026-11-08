@@ -1,6 +1,8 @@
 """
-Merged Indian IPTV EPG generator: JioTV + Zee5 + Tata Play
+Merged Indian IPTV EPG generator: JioTV + Zee5
 Outputs XMLTV file with standard xmltv_ids where available for best channel matching.
+Deduplicates channels: JioTV is primary; Zee5 channels whose xmltv_id already
+appears in JioTV are skipped (no duplicate <channel> element, no duplicate programmes).
 """
 import urllib.request, urllib.parse, json, datetime, xml.etree.ElementTree as ET
 import threading, time, sys, re, os, gzip
@@ -250,14 +252,16 @@ lines = [
 
 # Channels
 # JioTV channels: use xmltv_id as id if available, else "jio_{channel_id}"
-jio_ch_id_map = {}  # channel_id -> xmltv channel id used in XML
+jio_ch_id_map = {}   # channel_id -> xmltv channel id used in XML
+jio_xml_ids_used = set()  # all xmltv_ids written by JioTV (for Zee5 dedup)
+
 for ch in jio_channels:
     cid = str(ch["channel_id"])
     name = ch.get("channel_name","")
-    # Look up xmltv_id by name or id
     xid = jio_xmltv_ids.get(name.lower()) or jio_xmltv_ids.get(f"id_{cid}") or ""
     xml_id = xid if xid else f"jio_{cid}"
     jio_ch_id_map[cid] = xml_id
+    jio_xml_ids_used.add(xml_id)
     logo = ch.get("logoUrl","")
     if logo and not logo.startswith("http"):
         logo = "https://jiotvimages.cdn.jio.com/" + logo
@@ -269,16 +273,20 @@ for ch in jio_channels:
     if logo_tag: lines.append(f"    {logo_tag}")
     lines.append('  </channel>')
 
-# Zee5 channels
+# Zee5 channels — skip any whose xmltv_id is already covered by JioTV
 zee5_ch_id_map = {}
+zee5_skipped = 0
 for ch in zee5_channels:
     cid = ch["id"]
     name = ch["name"]
     xid = ch.get("xmltv_id","")
     xml_id = xid if xid else f"zee5_{cid}"
-    # Avoid duplicate IDs (JioTV may already have same xmltv_id)
-    # Add zee5 prefix if already seen
     zee5_ch_id_map[cid] = xml_id
+    # If JioTV already has this xmltv_id, don't write a duplicate <channel> element.
+    # Programmes for this channel will also be skipped below to avoid duplicates.
+    if xml_id in jio_xml_ids_used:
+        zee5_skipped += 1
+        continue
     logo = ch.get("logo","")
     if logo and not logo.startswith("http"):
         logo = f"https://akamaividz2.zee5.com/image/upload/resources/{cid}/channel_list/{logo}"
@@ -289,6 +297,8 @@ for ch in zee5_channels:
         lines.append(f'    <display-name lang="en">{esc(alias)}</display-name>')
     if logo_tag: lines.append(f"    {logo_tag}")
     lines.append('  </channel>')
+
+print(f"  Zee5: skipped {zee5_skipped} channels already covered by JioTV")
 
 # JioTV programmes
 prog_count = 0
@@ -310,10 +320,12 @@ for ch in jio_channels:
         lines.append('  </programme>')
         prog_count += 1
 
-# Zee5 programmes
+# Zee5 programmes — skip channels whose xmltv_id was already written by JioTV
 for ch in zee5_channels:
     cid = ch["id"]
     xml_id = zee5_ch_id_map.get(cid, f"zee5_{cid}")
+    if xml_id in jio_xml_ids_used:
+        continue  # JioTV already provides this channel's programmes
     for p in zee5_epg.get(cid, []):
         start = iso_to_xmltv(p.get("start_time",""))
         stop  = iso_to_xmltv(p.get("end_time",""))
@@ -340,9 +352,10 @@ else:
         f.write(content)
 
 size_kb = os.path.getsize(OUT_XML)//1024
-total_channels = len(jio_channels) + len(zee5_channels)
+zee5_unique = len(zee5_channels) - zee5_skipped
+total_channels = len(jio_channels) + zee5_unique
 print(f"\nDone! {OUT_XML}")
-print(f"  Channels: {len(jio_channels)} JioTV + {len(zee5_channels)} Zee5 = {total_channels} total")
+print(f"  Channels: {len(jio_channels)} JioTV + {zee5_unique} Zee5 unique ({zee5_skipped} Zee5 duplicates skipped) = {total_channels} total")
 print(f"  Programmes: {prog_count:,}")
 print(f"  File size: {size_kb:,} KB (compressed)")
 print(f"\nChannel ID format:")

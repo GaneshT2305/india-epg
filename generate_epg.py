@@ -306,6 +306,17 @@ print("\n=== Generating XMLTV ===")
 # key: channel_name.lower() as returned by JioTV API
 EXTRA_ALIASES = {
     "9x jhakaas": ["9x Jhakas", "9X Jhakas"],  # playlists often spell with single 'a'
+    # News18 channels rebranded — iptv-org still carries old names; add both so either playlist matches
+    "news18 marathi":                   ["News18 Lokmat"],
+    "news18 mp chhattisgarh":           ["News18 MP", "News18 Madhya Pradesh"],
+    "news18 up uttarakhand":            ["News18 UP", "News18 Uttar Pradesh"],
+    "news18 rajasthan":                 ["News18 RAJASTHAN"],
+    "news18 kannada":                   ["News18 Kannada News"],
+    "news18 punjab haryana himachal":   ["News18 Punjab Haryana", "News18 Punjab"],
+    "news18 bihar jharkhand":           ["News18 BIHAR", "News18 Bihar"],
+    "news18 delhi ncr jk":              ["News18 JKLH", "News18 Delhi"],
+    "news18 odia":                      ["News18 Oriya"],
+    "news18 bangla":                    ["News18 Bangla News"],
 }
 lines = [
     '<?xml version="1.0" encoding="UTF-8"?>',

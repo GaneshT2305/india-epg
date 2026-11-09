@@ -693,19 +693,34 @@ for ch in airtel_ch_info:
     lines.append('  </channel>')
 print(f"  Airtel: {len(at_written_ids)} unique channels added ({at_skipped} duplicates skipped)")
 
-# Astro Malaysia channels — only write channel defs not already covered
+# Astro Malaysia channels — write channel defs or inject aliases into existing ones
+# EPG matching is by display-name, so add "(Astro)" alias so playlist entries like
+# "Colors HD (Astro)" or "Sun TV HD (Astro)" match the right EPG channel.
 astro_written_ids = set()
 for cxid, (cname, _progs) in astro_ch_data.items():
-    if cxid in all_xml_ids_used:
-        continue  # channel def already exists (e.g. Colors.in@SD from JioTV)
-    all_xml_ids_used.add(cxid)
-    astro_written_ids.add(cxid)
-    lines.append(f'  <channel id="{esc(cxid)}">')
-    lines.append(f'    <display-name lang="en">{esc(cname)}</display-name>')
-    for alias in name_aliases(cname):
-        lines.append(f'    <display-name lang="en">{esc(alias)}</display-name>')
-    lines.append('  </channel>')
-print(f"  Astro: {len(astro_written_ids)} new channel defs added")
+    astro_alias = f"{cname} (Astro)"
+    if cxid not in all_xml_ids_used:
+        # New channel (e.g. SunTVMalaysia.my@SD) — write full definition
+        all_xml_ids_used.add(cxid)
+        astro_written_ids.add(cxid)
+        lines.append(f'  <channel id="{esc(cxid)}">')
+        lines.append(f'    <display-name lang="en">{esc(cname)}</display-name>')
+        lines.append(f'    <display-name lang="en">{esc(astro_alias)}</display-name>')
+        for alias in name_aliases(cname):
+            lines.append(f'    <display-name lang="en">{esc(alias)}</display-name>')
+        lines.append('  </channel>')
+    else:
+        # Channel def already written by Indian provider — inject "(Astro)" alias
+        # so playlist entries like "Colors HD (Astro)" still match this channel
+        target = f'<channel id="{esc(cxid)}">'
+        for i, line in enumerate(lines):
+            if target in line:
+                j = i + 1
+                while j < len(lines) and '</channel>' not in lines[j]:
+                    j += 1
+                lines.insert(j, f'    <display-name lang="en">{esc(astro_alias)}</display-name>')
+                break
+print(f"  Astro: {len(astro_written_ids)} new channel defs; (Astro) aliases injected for all")
 
 # magticom.ge channels (non-Indian: Bollywood HD etc.)
 for pname, pxmlid, _progs in magticom_channels_data:

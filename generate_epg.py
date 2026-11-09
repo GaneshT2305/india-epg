@@ -839,6 +839,37 @@ for pname, pxmlid, progs in magticom_channels_data:
         lines.append('  </programme>')
         prog_count += 1
 
+# ─── SD→HD programme copy for Indian channels ────────────────────────────────
+# Indian SD and HD channels broadcast the same content; Indian providers only
+# provide EPG under the HD xmltv_id. Copy HD programmes to SD so playlists
+# using tvg-id or name matching the SD channel still get EPG.
+# (This is distinct from Astro channels which have their own separate schedule.)
+INDIAN_SD_FROM_HD = {
+    "SonyMarathi.in@SD":  "SonyMarathi.in@HD",
+}
+for sd_id, hd_id in INDIAN_SD_FROM_HD.items():
+    hd_tag = f'channel="{hd_id}"'
+    sd_tag = f'channel="{sd_id}"'
+    copied = 0
+    in_block = False
+    cur_block = []
+    fallback_lines = []
+    for line in lines:
+        if not in_block and '<programme ' in line and hd_tag in line:
+            in_block = True
+            cur_block = [line.replace(hd_tag, sd_tag)]
+        elif in_block:
+            cur_block.append(line)
+            if '</programme>' in line:
+                fallback_lines.extend(cur_block)
+                copied += 1
+                in_block = False
+                cur_block = []
+    if fallback_lines:
+        lines[-1:-1] = fallback_lines
+        prog_count += copied
+    print(f"  SD copy: {sd_id} <- {hd_id}: {copied} programmes")
+
 # Astro Malaysia programmes
 astro_prog_count = 0
 for cxid, (cname, progs) in astro_ch_data.items():

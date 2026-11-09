@@ -496,6 +496,74 @@ for name, xmltv_id, channel_id in MAGTICOM_CHANNELS:
     print(f"  {name}: {len(progs)} programmes")
     magticom_channels_data.append((name, xmltv_id, progs))
 
+# ─── ASTRO MALAYSIA ───────────────────────────────────────────────────────────
+print("\n=== Astro Malaysia ===")
+# Indian channels on Astro Malaysia with their own distinct schedule
+# (Colors Hindi HD on Astro plays Bollywood movies, NOT the same as JioTV Colors HD)
+# Also includes Astro-exclusive Tamil channels not carried by any Indian provider.
+# site_id from content.astro.com.my iptv-org channels.xml → (display_name, xmltv_id)
+ASTRO_CHANNELS = {
+    365: ("Colors Hindi HD",       "Colors.in@SD"),
+    298: ("Colors Tamil HD",       "ColorsTamil.in@SD"),
+    357: ("Star Vijay HD",         "StarVijay.in@SD"),
+    67:  ("Adithya TV",            "AdithyaTV.in@SD"),
+    358: ("SUN TV HD",             "SunTVMalaysia.my@SD"),
+    397: ("Astro Vaanavil",        "AstroVaanavil.my@SD"),
+    399: ("Astro Vellithirai HD",  "AstroVellithirai.my@SD"),
+}
+
+astro_ch_data = {}  # xml_id -> (name, [progs])
+_astro_lock = threading.Lock()
+
+def _fetch_astro(site_id, cname, cxid):
+    raw = fetch(f"https://contenthub-api.eco.astro.com.my/channel/{site_id}.json", timeout=20)
+    if not raw:
+        print(f"  {cname}: fetch failed")
+        return
+    try:
+        schedule = json.loads(raw).get("response", {}).get("schedule", {})
+        progs = []
+        for day_items in schedule.values():
+            for p in day_items:
+                start = iso_to_xmltv(p.get("eventStartMyt", "") or p.get("datetimeInUtc", ""))
+                stop  = iso_to_xmltv(p.get("eventEndMyt", ""))
+                if not start or not stop:
+                    dur_str = p.get("duration", "")
+                    start_str = p.get("datetimeInUtc", "")
+                    if start_str and dur_str:
+                        try:
+                            m = re.match(r"(\d+):(\d+):(\d+)", dur_str)
+                            if m:
+                                secs = int(m.group(1))*3600 + int(m.group(2))*60 + int(m.group(3))
+                                start_dt = datetime.datetime.fromisoformat(start_str.replace("Z","+00:00"))
+                                start = start_dt.strftime("%Y%m%d%H%M%S +0000")
+                                stop  = (start_dt + datetime.timedelta(seconds=secs)).strftime("%Y%m%d%H%M%S +0000")
+                        except:
+                            pass
+                if not start or not stop:
+                    continue
+                title = p.get("mainTitle", "") or p.get("title", "")
+                if not title:
+                    continue
+                progs.append({
+                    "start": start, "stop": stop,
+                    "title": title,
+                    "desc": p.get("description", ""),
+                    "genre": p.get("genre", "") or p.get("subGenre", ""),
+                })
+        with _astro_lock:
+            astro_ch_data[cxid] = (cname, progs)
+        print(f"  {cname}: {len(progs)} programmes")
+    except Exception as e:
+        print(f"  Astro fetch error for {site_id} {cname}: {e}")
+
+_astro_threads = []
+for _sid, (_cname, _cxid) in ASTRO_CHANNELS.items():
+    _t = threading.Thread(target=_fetch_astro, args=(_sid, _cname, _cxid), daemon=True)
+    _astro_threads.append(_t); _t.start()
+for _t in _astro_threads: _t.join()
+print(f"  Astro: fetched EPG for {len(astro_ch_data)} channels")
+
 # ─── GENERATE XMLTV ───────────────────────────────────────────────────────────
 print("\n=== Generating XMLTV ===")
 
@@ -517,7 +585,7 @@ EXTRA_ALIASES = {
 }
 lines = [
     '<?xml version="1.0" encoding="UTF-8"?>',
-    '<tv generator-info-name="india-epg-merged" source-info-name="JioTV+Zee5+TataPlay+DishTV+Airtel+magticom">',
+    '<tv generator-info-name="india-epg-merged" source-info-name="JioTV+Zee5+TataPlay+DishTV+Airtel+magticom+Astro">',
 ]
 
 # Channels
@@ -624,6 +692,20 @@ for ch in airtel_ch_info:
         lines.append(f'    <display-name lang="en">{esc(alias)}</display-name>')
     lines.append('  </channel>')
 print(f"  Airtel: {len(at_written_ids)} unique channels added ({at_skipped} duplicates skipped)")
+
+# Astro Malaysia channels — only write channel defs not already covered
+astro_written_ids = set()
+for cxid, (cname, _progs) in astro_ch_data.items():
+    if cxid in all_xml_ids_used:
+        continue  # channel def already exists (e.g. Colors.in@SD from JioTV)
+    all_xml_ids_used.add(cxid)
+    astro_written_ids.add(cxid)
+    lines.append(f'  <channel id="{esc(cxid)}">')
+    lines.append(f'    <display-name lang="en">{esc(cname)}</display-name>')
+    for alias in name_aliases(cname):
+        lines.append(f'    <display-name lang="en">{esc(alias)}</display-name>')
+    lines.append('  </channel>')
+print(f"  Astro: {len(astro_written_ids)} new channel defs added")
 
 # magticom.ge channels (non-Indian: Bollywood HD etc.)
 for pname, pxmlid, _progs in magticom_channels_data:
@@ -742,6 +824,19 @@ for pname, pxmlid, progs in magticom_channels_data:
         lines.append('  </programme>')
         prog_count += 1
 
+# Astro Malaysia programmes
+astro_prog_count = 0
+for cxid, (cname, progs) in astro_ch_data.items():
+    for p in progs:
+        lines.append(f'  <programme start="{p["start"]}" stop="{p["stop"]}" channel="{esc(cxid)}">')
+        lines.append(f'    <title lang="en">{esc(p["title"])}</title>')
+        if p.get("desc"): lines.append(f'    <desc lang="en">{esc(p["desc"])}</desc>')
+        if p.get("genre"): lines.append(f'    <category lang="en">{esc(p["genre"])}</category>')
+        lines.append('  </programme>')
+        astro_prog_count += 1
+        prog_count += 1
+print(f"  Astro: {astro_prog_count} programmes added")
+
 lines.append("</tv>")
 
 content = "\n".join(lines).encode("utf-8")
@@ -755,9 +850,10 @@ else:
 size_kb = os.path.getsize(OUT_XML)//1024
 zee5_unique = len(zee5_channels) - zee5_skipped
 magticom_unique = len(magticom_channels_data)
-total_channels = len(jio_channels) + zee5_unique + len(tp_written_ids) + len(dt_written_ids) + len(at_written_ids) + magticom_unique
+astro_unique = len(astro_written_ids)
+total_channels = len(jio_channels) + zee5_unique + len(tp_written_ids) + len(dt_written_ids) + len(at_written_ids) + magticom_unique + astro_unique
 print(f"\nDone! {OUT_XML}")
-print(f"  Channels: {len(jio_channels)} JioTV + {zee5_unique} Zee5 + {len(tp_written_ids)} TataPlay + {len(dt_written_ids)} DishTV + {len(at_written_ids)} Airtel + {magticom_unique} magticom = {total_channels} total")
+print(f"  Channels: {len(jio_channels)} JioTV + {zee5_unique} Zee5 + {len(tp_written_ids)} TataPlay + {len(dt_written_ids)} DishTV + {len(at_written_ids)} Airtel + {magticom_unique} magticom + {astro_unique} Astro = {total_channels} total")
 print(f"  Programmes: {prog_count:,}")
 print(f"  File size: {size_kb:,} KB (compressed)")
 print(f"\nChannel ID format:")
